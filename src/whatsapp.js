@@ -37,8 +37,9 @@ export async function startWhatsApp() {
 
         sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
             if (qr) {
-                console.log("Scan this QR using WhatsApp Linked Devices:");
-                qrcode.generate(qr, { small: true });
+                console.log("WHATSAPP_QR_START");
+                console.log(qr);
+                console.log("WHATSAPP_QR_END");
             }
 
             if (connection === "connecting") {
