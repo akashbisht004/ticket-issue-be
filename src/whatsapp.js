@@ -5,59 +5,99 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 
 import qrcode from "qrcode-terminal";
+import { mkdir } from "node:fs/promises";
 
 let sock = null;
 let connectionStatus = "disconnected";
+let reconnectTimer = null;
+let starting = false;
 
 export async function startWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState(
-        "./auth_info_baileys"
-    );
+    // Prevent multiple simultaneous connection attempts
+    if (starting || (sock && connectionStatus !== "disconnected")) {
+        return;
+    }
 
-    sock = makeWASocket({
-        auth: state,
-        markOnlineOnConnect: false,
-    });
+    starting = true;
 
-    sock.ev.on("creds.update", saveCreds);
+    try {
+        const authDir =
+            process.env.WHATSAPP_AUTH_DIR || "./auth_info_baileys";
 
-    sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+        await mkdir(authDir, { recursive: true });
 
-        // Display QR code when authentication is required
-        if (qr) {
-            console.log("\nScan this QR code using WhatsApp:\n");
-            qrcode.generate(qr, { small: true });
-        }
+        const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-        if (connection === "connecting") {
-            connectionStatus = "connecting";
-            console.log("Connecting to WhatsApp...");
-        }
+        sock = makeWASocket({
+            auth: state,
+            markOnlineOnConnect: false,
+        });
 
-        if (connection === "open") {
-            connectionStatus = "connected";
-            console.log("WhatsApp connected successfully!");
-        }
+        sock.ev.on("creds.update", saveCreds);
 
-        if (connection === "close") {
-            connectionStatus = "disconnected";
-
-            const statusCode =
-                lastDisconnect?.error?.output?.statusCode;
-
-            console.log("Connection closed:", statusCode);
-
-            if (statusCode === DisconnectReason.loggedOut) {
-                console.log("Logged out. Please authenticate again.");
-                return;
+        sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+            if (qr) {
+                console.log("Scan this QR using WhatsApp Linked Devices:");
+                qrcode.generate(qr, { small: true });
             }
 
-            console.log("Attempting to reconnect...");
-            setTimeout(() => startWhatsApp(), 3000);
-        }
-    });
-}
+            if (connection === "connecting") {
+                connectionStatus = "connecting";
+                console.log("Connecting to WhatsApp...");
+            }
 
+            if (connection === "open") {
+                connectionStatus = "connected";
+                console.log("WhatsApp connected successfully!");
+            }
+
+            if (connection === "close") {
+                connectionStatus = "disconnected";
+                sock = null;
+
+                const statusCode =
+                    lastDisconnect?.error?.output?.statusCode;
+
+                console.log("WhatsApp connection closed:", statusCode);
+
+                if (statusCode === DisconnectReason.loggedOut) {
+                    console.log(
+                        "WhatsApp logged out. A fresh QR scan is required."
+                    );
+                    return;
+                }
+
+                console.log("Reconnecting to WhatsApp in 5 seconds...");
+
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                }
+
+                reconnectTimer = setTimeout(() => {
+                    reconnectTimer = null;
+                    startWhatsApp().catch((error) => {
+                        console.error("WhatsApp reconnect failed:", error);
+                    });
+                }, 5000);
+            }
+        });
+    } catch (error) {
+        sock = null;
+        connectionStatus = "disconnected";
+        console.error("WhatsApp initialization failed:", error);
+
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+        }
+
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startWhatsApp().catch(console.error);
+        }, 5000);
+    } finally {
+        starting = false;
+    }
+}
 
 export async function sendGroupMessage(groupId, message) {
     if (!sock || connectionStatus !== "connected") {
@@ -68,18 +108,18 @@ export async function sendGroupMessage(groupId, message) {
         throw new Error("Invalid WhatsApp group ID");
     }
 
-    // Verify that the account belongs to this group
     const groups = await sock.groupFetchAllParticipating();
 
     if (!groups[groupId]) {
-        throw new Error("Group not found or account is not a participant");
+        throw new Error(
+            "Group not found or account is not a participant"
+        );
     }
 
     return await sock.sendMessage(groupId, {
         text: message,
     });
 }
-
 
 export function getWhatsAppSocket() {
     return sock;
